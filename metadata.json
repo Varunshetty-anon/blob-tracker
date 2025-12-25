@@ -1,0 +1,5 @@
+{
+  "name": "VisionCore Tracker",
+  "description": "A cinematic, browser-based video blob tracking system using OpenCV.js with real-time sci-fi aesthetics and export capabilities.",
+  "requestFramePermissions": []
+}
