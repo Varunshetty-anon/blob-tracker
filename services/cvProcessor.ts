@@ -78,13 +78,15 @@ export class CVProcessor {
    * @param width - actual processing width
    * @param height - actual processing height
    * @param scaleFactor - multiplier to convert processed coords back to original video space
+   * @param useGpuPreprocess - if true, assumes input is already grayscale and blurred
    */
   public processFrame(
     ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, 
     width: number, 
     height: number, 
     settings: TrackerSettings,
-    scaleFactor: number = 1
+    scaleFactor: number = 1,
+    useGpuPreprocess: boolean = false
   ): DetectedBlob[] {
     // Lazy init
     if (!this.cv && typeof window !== 'undefined' && window.cv) {
@@ -106,12 +108,16 @@ export class CVProcessor {
     }
 
     // 2. CV Pipeline
+    // Always convert to gray container, even if visually gray (RGBA -> 1 channel)
     this.cv.cvtColor(this.src, this.gray, this.cv.COLOR_RGBA2GRAY, 0);
     
-    // Blur (ensure odd kernel size)
-    const b = settings.blurSize % 2 === 0 ? settings.blurSize + 1 : settings.blurSize;
-    const kSize = new this.cv.Size(b, b);
-    this.cv.GaussianBlur(this.gray, this.gray, kSize, 0, 0, this.cv.BORDER_DEFAULT);
+    if (!useGpuPreprocess) {
+        // CPU Blur (Slow)
+        // Blur (ensure odd kernel size)
+        const b = settings.blurSize % 2 === 0 ? settings.blurSize + 1 : settings.blurSize;
+        const kSize = new this.cv.Size(b, b);
+        this.cv.GaussianBlur(this.gray, this.gray, kSize, 0, 0, this.cv.BORDER_DEFAULT);
+    }
 
     this.cv.threshold(this.gray, this.dst, settings.threshold, 255, this.cv.THRESH_BINARY);
 
@@ -125,17 +131,11 @@ export class CVProcessor {
 
     // 3. Extract & Scale Coords
     const currentFrameBlobs: Partial<DetectedBlob>[] = [];
-    const minAreaScaled = settings.minArea * (scaleFactor * scaleFactor) * 0.1; // Rough adjustment for scale
-
+    
     for (let i = 0; i < this.contours.size(); ++i) {
       const contour = this.contours.get(i);
       const area = this.cv.contourArea(contour, false);
 
-      // We compare area in processing space, but might need to tune threshold based on scale
-      // For simplicity, we assume minArea setting is relative to 1080p, so we scale it down? 
-      // Actually, standardizing minArea to "screen pixels" is tricky. 
-      // Let's assume minArea is "pixels in the source video". 
-      // So processed area needs to be scaled up to compare? No, simpler:
       // Convert area to real-world area (approx)
       const realArea = area * (scaleFactor * scaleFactor);
 

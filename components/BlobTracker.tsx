@@ -4,6 +4,7 @@ import { TrackerSettings, DetectedBlob, ProcessingStats, RenderState } from '../
 
 // Performance Config
 const PREVIEW_MAX_DIMENSION = 480; // Limit CV processing size for preview
+const RENDER_CV_MAX_DIMENSION = 480; // Limit CV processing size for export (Visuals remain full res)
 
 interface BlobTrackerProps {
   videoFile: File | null;
@@ -208,55 +209,54 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       const ctx = renderCanvas.getContext('2d');
       if (!ctx) return;
 
-      // 2. Determine Export Format (Prioritize MP4)
+      // 1b. Setup CV Canvas (Scaled Down for Speed)
+      const maxDim = Math.max(dimensions.w, dimensions.h);
+      const cvScale = maxDim > RENDER_CV_MAX_DIMENSION ? maxDim / RENDER_CV_MAX_DIMENSION : 1;
+      const cvW = Math.floor(dimensions.w / cvScale);
+      const cvH = Math.floor(dimensions.h / cvScale);
+      
+      const cvCanvas = document.createElement('canvas');
+      cvCanvas.width = cvW;
+      cvCanvas.height = cvH;
+      // GPU filter support
+      const cvCtx = cvCanvas.getContext('2d'); 
+      if (!cvCtx) return;
+
+      // 2. Determine Export Format (Strictly Prefer MP4)
       let mimeType = '';
-      let extension = 'webm';
+      let extension = 'mp4';
       
       const mp4Types = [
-        "video/mp4; codecs=avc1.42E01E, mp4a.40.2",
         "video/mp4; codecs=h264",
+        "video/mp4; codecs=avc1.42E01E, mp4a.40.2",
         "video/mp4; codecs=avc1",
         "video/mp4"
       ];
       
-      // Try finding a supported MP4 type
       const supportedMp4 = mp4Types.find(type => MediaRecorder.isTypeSupported(type));
 
       if (supportedMp4) {
         mimeType = supportedMp4;
         extension = 'mp4';
-      } else if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9")) {
-        mimeType = "video/webm;codecs=vp9";
-        extension = 'webm';
       } else {
-        mimeType = "video/webm";
+        // Fallback (e.g. Firefox)
+        console.warn("MP4 export not supported by this browser. Falling back to WebM.");
+        if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9")) {
+             mimeType = "video/webm;codecs=vp9";
+        } else {
+             mimeType = "video/webm";
+        }
         extension = 'webm';
       }
 
       console.log(`Using Export Format: ${mimeType}`);
 
-      // 3. Setup Stream
-      // Note: We use 0 fps for manual capture if requestFrame is supported.
-      let stream: MediaStream;
-      let track: any = null;
+      // 3. Setup Stream (Constant 30FPS)
+      // We use 30FPS auto-capture to ensure the output video plays at 1x speed.
+      // Render loop will update the canvas. If render is slow, frames will be duplicated 
+      // in the recording, preserving correct timing.
+      const stream = renderCanvas.captureStream(30);
       
-      try {
-        // Try to capture stream with 0FPS for manual frame control
-        stream = renderCanvas.captureStream(0);
-        track = stream.getVideoTracks()[0];
-        
-        // If requestFrame is missing (e.g. Firefox), we might need fallback
-        if (!track.requestFrame) {
-            console.warn("Browser track.requestFrame() missing. Falling back to auto-capture stream (30fps).");
-            // Re-create stream with 30fps auto-capture. 
-            // Note: This won't be perfect frame-by-frame if rendering is slow, but better than nothing.
-            stream = renderCanvas.captureStream(30);
-        }
-      } catch (e) {
-         console.warn("captureStream error", e);
-         stream = renderCanvas.captureStream(30);
-      }
-
       const recorder = new MediaRecorder(stream, { 
         mimeType, 
         videoBitsPerSecond: 15000000 // 15Mbps
@@ -273,9 +273,9 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       const targetFps = 30; 
       const frameDuration = 1 / targetFps;
       let currentTime = 0;
-      const duration = vid.duration || 10; // Fallback duration
+      const duration = vid.duration || 10; 
 
-      cvProcessor.current.cleanup(); // Reset for full res processing
+      cvProcessor.current.cleanup(); // Reset mats
 
       while (currentTime < duration && !cancelled) {
         // Seek
@@ -295,37 +295,36 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
            }, 500); 
         });
 
-        // Processing
+        // A. Draw Full Res Video to Render Canvas
         ctx.drawImage(vid, 0, 0);
-        
-        const blobs = cvProcessor.current.processFrame(ctx, dimensions.w, dimensions.h, settings, 1);
 
-        // Draw Visuals
+        // B. GPU ACCELERATED PRE-PROCESSING
+        const blurRadius = Math.max(0, (settings.blurSize - 1) / 2);
+        cvCtx.filter = `grayscale(100%) blur(${blurRadius}px)`;
+        
+        // Draw Scaled Video to CV Canvas 
+        cvCtx.drawImage(vid, 0, 0, cvW, cvH);
+        cvCtx.filter = 'none'; // Reset
+
+        // C. Process CV on Low Res Canvas (CPU - Skip Blur)
+        const blobs = cvProcessor.current.processFrame(cvCtx, cvW, cvH, settings, cvScale, true);
+
+        // D. Draw Overlays on Full Res Render Canvas
         if (!settings.showVideo) {
           ctx.fillStyle = '#000000';
           ctx.fillRect(0, 0, dimensions.w, dimensions.h);
         }
-
         drawOverlays(ctx, blobs, dimensions.w, dimensions.h, currentTime * 1000);
 
-        // Commit Frame
-        if (track && track.requestFrame) {
-            track.requestFrame();
-        } else {
-            // For browsers without requestFrame, we just draw. 
-            // Since we initialized captureStream(30), it is sampling automatically.
-            // We need to wait slightly to ensure the sample is taken? 
-            // This is imperfect but the best we can do without requestFrame.
-            await new Promise(r => setTimeout(r, 1000/60)); 
-        }
+        // E. Yield to ensure MediaRecorder picks up the frame
+        // Since captureStream(30) runs on a timer, we don't need to manually request frames.
+        // However, we need to make sure we don't block the main thread entirely.
+        await new Promise(r => setTimeout(r, 0));
         
         // Progress
         onRenderProgress(Math.min(100, Math.round((currentTime / duration) * 100)));
         
         currentTime += frameDuration;
-        
-        // Yield to event loop
-        await new Promise(r => setTimeout(r, 0));
       }
 
       // Finish
@@ -333,7 +332,10 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         const blob = new Blob(chunks, { type: mimeType });
         onRenderComplete(blob, extension);
       };
+      
+      // Stop recorder and stream tracks
       recorder.stop();
+      stream.getTracks().forEach(track => track.stop());
       
       // Reset
       vid.currentTime = 0;
@@ -378,13 +380,21 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         processCanvasRef.current.width = pW;
         processCanvasRef.current.height = pH;
     }
-    const pCtx = processCanvasRef.current.getContext('2d', { willReadFrequently: true });
+    // Remove willReadFrequently to allow GPU filters
+    const pCtx = processCanvasRef.current.getContext('2d');
     
     let blobs: DetectedBlob[] = [];
     if (pCtx) {
         const tStart = performance.now();
+        
+        // GPU Acceleration: Use Canvas filters for Gray + Blur
+        const blurRadius = Math.max(0, (settings.blurSize - 1) / 2);
+        pCtx.filter = `grayscale(100%) blur(${blurRadius}px)`;
         pCtx.drawImage(vid, 0, 0, pW, pH);
-        blobs = cvProcessor.current.processFrame(pCtx, pW, pH, settings, previewScale);
+        pCtx.filter = 'none';
+
+        // CPU Processing (Skip Blur)
+        blobs = cvProcessor.current.processFrame(pCtx, pW, pH, settings, previewScale, true);
         
         const tEnd = performance.now();
         onStatsUpdate({
@@ -399,7 +409,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
     if (ctx) drawOverlays(ctx, blobs, w, h, performance.now());
 
     requestRef.current = requestAnimationFrame(animate);
-  }, [dimensions, previewScale, cvReady, settings, renderState, onStatsUpdate, isPlaying]); // Added isPlaying dependency if needed? No, ref is enough.
+  }, [dimensions, previewScale, cvReady, settings, renderState, onStatsUpdate, isPlaying]);
 
   useEffect(() => {
     requestRef.current = requestAnimationFrame(animate);
