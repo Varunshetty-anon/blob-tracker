@@ -7,6 +7,7 @@ const PREVIEW_MAX_DIMENSION = 480; // Limit CV processing size for preview
 
 interface BlobTrackerProps {
   videoFile: File | null;
+  isPlaying: boolean;
   settings: TrackerSettings;
   renderState: RenderState;
   onStatsUpdate: (stats: ProcessingStats) => void;
@@ -16,6 +17,7 @@ interface BlobTrackerProps {
 
 const BlobTracker: React.FC<BlobTrackerProps> = ({
   videoFile,
+  isPlaying,
   settings,
   renderState,
   onStatsUpdate,
@@ -76,6 +78,17 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
     }
   }, [videoFile]);
 
+  // Video Playback Control
+  useEffect(() => {
+    if (videoRef.current && videoLoaded && renderState === 'idle') {
+      if (isPlaying) {
+        videoRef.current.play().catch(e => console.error("Play failed", e));
+      } else {
+        videoRef.current.pause();
+      }
+    }
+  }, [isPlaying, videoLoaded, renderState]);
+
   // --------------- HELPER: DRAW OVERLAYS ----------------
   const drawOverlays = (
     ctx: CanvasRenderingContext2D, 
@@ -85,7 +98,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
     time: number
   ) => {
     // Note: Do NOT clearRect here, as we draw on top of the video frame.
-    // ctx.clearRect(0, 0, width, height); 
 
     blobs.forEach(blob => {
       // Color Logic
@@ -104,7 +116,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       if (blob.visualY === undefined) blob.visualY = blob.y;
 
       // 1. Drift (Lag) - Interpolate towards actual position
-      // Lower factor = more lag/drift. Map 0-1 settings to useful range.
       const lerpFactor = 0.8 - (settings.drift * 0.7); 
       blob.visualX = blob.visualX + (blob.x - blob.visualX) * lerpFactor;
       blob.visualY = blob.visualY + (blob.y - blob.visualY) * lerpFactor;
@@ -126,7 +137,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         ctx.beginPath();
         ctx.lineWidth = 1;
         ctx.globalAlpha = 0.6;
-        // Draw history with some jitter too? minimal
         const h0 = blob.history[0];
         ctx.moveTo(h0.x, h0.y);
         for (let i = 1; i < blob.history.length; i++) {
@@ -147,19 +157,19 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       ctx.shadowBlur = 15; // Neon glow
 
       ctx.beginPath();
-      // Top Left
+      // Corners
       ctx.moveTo(drawX - size/2, drawY - size/2 + cornerLen);
       ctx.lineTo(drawX - size/2, drawY - size/2);
       ctx.lineTo(drawX - size/2 + cornerLen, drawY - size/2);
-      // Top Right
+      
       ctx.moveTo(drawX + size/2 - cornerLen, drawY - size/2);
       ctx.lineTo(drawX + size/2, drawY - size/2);
       ctx.lineTo(drawX + size/2, drawY - size/2 + cornerLen);
-      // Bottom Right
+      
       ctx.moveTo(drawX + size/2, drawY + size/2 - cornerLen);
       ctx.lineTo(drawX + size/2, drawY + size/2);
       ctx.lineTo(drawX + size/2 - cornerLen, drawY + size/2);
-      // Bottom Left
+      
       ctx.moveTo(drawX - size/2 + cornerLen, drawY + size/2);
       ctx.lineTo(drawX - size/2, drawY + size/2);
       ctx.lineTo(drawX - size/2, drawY + size/2 - cornerLen);
@@ -184,7 +194,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
   };
 
   // --------------- RENDER PIPELINE (Generate) ----------------
-  // This effect runs once when renderState switches to 'rendering'
   useEffect(() => {
     if (renderState !== 'rendering' || !videoRef.current || !videoLoaded) return;
 
@@ -199,23 +208,22 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       const ctx = renderCanvas.getContext('2d');
       if (!ctx) return;
 
-      // 2. Setup Recorder with MP4 priority
-      const stream = renderCanvas.captureStream(0); // 0 FPS (manual frame request)
-      const track = stream.getVideoTracks()[0];
-      // @ts-ignore - Check for requestFrame support
-      if (!track.requestFrame) {
-        console.warn("Browser does not support track.requestFrame(). Export might vary in framerate.");
-      }
-
+      // 2. Determine Export Format (Prioritize MP4)
       let mimeType = '';
       let extension = 'webm';
+      
+      const mp4Types = [
+        "video/mp4; codecs=avc1.42E01E, mp4a.40.2",
+        "video/mp4; codecs=h264",
+        "video/mp4; codecs=avc1",
+        "video/mp4"
+      ];
+      
+      // Try finding a supported MP4 type
+      const supportedMp4 = mp4Types.find(type => MediaRecorder.isTypeSupported(type));
 
-      // Priority: MP4 (H.264) > MP4 (Generic) > WebM (VP9) > WebM (Generic)
-      if (MediaRecorder.isTypeSupported("video/mp4; codecs=avc1.42E01E, mp4a.40.2")) {
-        mimeType = "video/mp4; codecs=avc1.42E01E, mp4a.40.2";
-        extension = 'mp4';
-      } else if (MediaRecorder.isTypeSupported("video/mp4")) {
-        mimeType = "video/mp4";
+      if (supportedMp4) {
+        mimeType = supportedMp4;
         extension = 'mp4';
       } else if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9")) {
         mimeType = "video/webm;codecs=vp9";
@@ -227,26 +235,47 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
 
       console.log(`Using Export Format: ${mimeType}`);
 
+      // 3. Setup Stream
+      // Note: We use 0 fps for manual capture if requestFrame is supported.
+      let stream: MediaStream;
+      let track: any = null;
+      
+      try {
+        // Try to capture stream with 0FPS for manual frame control
+        stream = renderCanvas.captureStream(0);
+        track = stream.getVideoTracks()[0];
+        
+        // If requestFrame is missing (e.g. Firefox), we might need fallback
+        if (!track.requestFrame) {
+            console.warn("Browser track.requestFrame() missing. Falling back to auto-capture stream (30fps).");
+            // Re-create stream with 30fps auto-capture. 
+            // Note: This won't be perfect frame-by-frame if rendering is slow, but better than nothing.
+            stream = renderCanvas.captureStream(30);
+        }
+      } catch (e) {
+         console.warn("captureStream error", e);
+         stream = renderCanvas.captureStream(30);
+      }
+
       const recorder = new MediaRecorder(stream, { 
         mimeType, 
-        videoBitsPerSecond: 25000000 // High bitrate (25Mbps)
+        videoBitsPerSecond: 15000000 // 15Mbps
       });
       
       const chunks: Blob[] = [];
       recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
       recorder.start();
 
-      // 3. Loop Video Frame-by-Frame
+      // 4. Render Loop
       vid.pause();
       vid.currentTime = 0;
       
-      const fps = 30; // Target export FPS
-      const frameDuration = 1 / fps;
+      const targetFps = 30; 
+      const frameDuration = 1 / targetFps;
       let currentTime = 0;
-      const duration = vid.duration;
+      const duration = vid.duration || 10; // Fallback duration
 
-      // Disable processor scaling for render (full quality)
-      cvProcessor.current.cleanup(); // Reset for full res
+      cvProcessor.current.cleanup(); // Reset for full res processing
 
       while (currentTime < duration && !cancelled) {
         // Seek
@@ -259,17 +288,16 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
              resolve();
            };
            vid.addEventListener('seeked', onSeek);
-           // Fallback in case seeked doesn't fire fast enough
+           // Timeout fallback
            setTimeout(() => {
-             vid.removeEventListener('seeked', onSeek);
-             resolve();
-           }, 200); 
+               vid.removeEventListener('seeked', onSeek);
+               resolve(); 
+           }, 500); 
         });
 
         // Processing
         ctx.drawImage(vid, 0, 0);
         
-        // Process at FULL resolution (scaleFactor = 1)
         const blobs = cvProcessor.current.processFrame(ctx, dimensions.w, dimensions.h, settings, 1);
 
         // Draw Visuals
@@ -281,15 +309,22 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         drawOverlays(ctx, blobs, dimensions.w, dimensions.h, currentTime * 1000);
 
         // Commit Frame
-        // @ts-ignore
-        if (track.requestFrame) track.requestFrame();
+        if (track && track.requestFrame) {
+            track.requestFrame();
+        } else {
+            // For browsers without requestFrame, we just draw. 
+            // Since we initialized captureStream(30), it is sampling automatically.
+            // We need to wait slightly to ensure the sample is taken? 
+            // This is imperfect but the best we can do without requestFrame.
+            await new Promise(r => setTimeout(r, 1000/60)); 
+        }
         
         // Progress
         onRenderProgress(Math.min(100, Math.round((currentTime / duration) * 100)));
         
         currentTime += frameDuration;
         
-        // Small yield to UI
+        // Yield to event loop
         await new Promise(r => setTimeout(r, 0));
       }
 
@@ -300,7 +335,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       };
       recorder.stop();
       
-      // Restore video state
+      // Reset
       vid.currentTime = 0;
     };
 
@@ -312,7 +347,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
 
   // --------------- LIVE PREVIEW LOOP ----------------
   const animate = useCallback((time: number) => {
-    if (renderState === 'rendering') return; // Pause preview loop during render
+    if (renderState === 'rendering') return;
     
     if (!canvasRef.current || !videoRef.current || !processCanvasRef.current || !cvReady) {
       requestRef.current = requestAnimationFrame(animate);
@@ -321,20 +356,10 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
 
     const ctx = canvasRef.current.getContext('2d');
     const vid = videoRef.current;
-    
-    // Check if playing
-    if (vid.paused && !vid.seeking) {
-        // Still draw once if paused? Yes, to keep overlays visible on pause
-        // But skip heavy CV if paused, unless we want to see result of parameter change
-        // For perf: We will run CV even on pause, but maybe throttled? 
-        // Let's run it. The preview scaling makes it cheap.
-    }
-
     const w = dimensions.w;
     const h = dimensions.h;
 
     // 1. Draw Display Video
-    // Note: This logic must match the render loop visually
     if (settings.showVideo) {
       ctx?.drawImage(vid, 0, 0, w, h);
     } else {
@@ -349,7 +374,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
     const pW = Math.floor(w / previewScale);
     const pH = Math.floor(h / previewScale);
     
-    // Resize offscreen canvas if needed
     if (processCanvasRef.current.width !== pW) {
         processCanvasRef.current.width = pW;
         processCanvasRef.current.height = pH;
@@ -360,7 +384,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
     if (pCtx) {
         const tStart = performance.now();
         pCtx.drawImage(vid, 0, 0, pW, pH);
-        // Pass scale factor to processor so it returns coordinate in full video space
         blobs = cvProcessor.current.processFrame(pCtx, pW, pH, settings, previewScale);
         
         const tEnd = performance.now();
@@ -372,11 +395,11 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         });
     }
 
-    // 3. Draw Overlays (High Res on Display Canvas)
+    // 3. Draw Overlays
     if (ctx) drawOverlays(ctx, blobs, w, h, performance.now());
 
     requestRef.current = requestAnimationFrame(animate);
-  }, [dimensions, previewScale, cvReady, settings, renderState, onStatsUpdate]);
+  }, [dimensions, previewScale, cvReady, settings, renderState, onStatsUpdate, isPlaying]); // Added isPlaying dependency if needed? No, ref is enough.
 
   useEffect(() => {
     requestRef.current = requestAnimationFrame(animate);
@@ -388,7 +411,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
   return (
     <div ref={containerRef} className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden shadow-2xl">
       
-      {/* Loading Overlay */}
       {!cvReady && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-cyber-black/90 backdrop-blur-md">
             <div className="text-neon-blue font-mono animate-pulse text-xl tracking-widest">[ SYSTEM BOOT ]</div>
@@ -396,7 +418,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         </div>
       )}
 
-      {/* Render Progress Overlay */}
       {renderState === 'rendering' && (
          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
              <div className="text-neon-blue font-mono text-2xl tracking-widest mb-4">RENDERING SEQUENCE</div>
@@ -407,7 +428,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
          </div>
       )}
 
-      {/* Source Video (Hidden) */}
       <video
         ref={videoRef}
         className="hidden"
@@ -416,11 +436,8 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         loop
         crossOrigin="anonymous"
       />
-
-      {/* Process Canvas (Hidden, low res) */}
       <canvas ref={processCanvasRef} className="hidden" />
 
-      {/* Main Display Canvas */}
       <canvas
         ref={canvasRef}
         width={dimensions.w}
@@ -428,7 +445,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         className="max-w-full max-h-full object-contain shadow-[0_0_20px_rgba(0,0,0,0.5)]"
       />
       
-      {/* Grid Decoration */}
       <div className="absolute inset-0 pointer-events-none opacity-[0.03]"
         style={{
            backgroundImage: `

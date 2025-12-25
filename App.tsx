@@ -56,7 +56,6 @@ function App() {
   };
 
   const handleRenderUpdate = (progress: number) => {
-      // Update DOM element directly for smoother bar? Or state is fine for now
       setRenderProgress(progress);
       // We can also update a CSS variable if needed
       const bar = document.getElementById('render-bar-fill');
@@ -94,6 +93,7 @@ function App() {
             {videoFile ? (
                 <BlobTracker 
                     videoFile={videoFile}
+                    isPlaying={isPlaying}
                     settings={settings}
                     renderState={renderState}
                     onStatsUpdate={setStats}
