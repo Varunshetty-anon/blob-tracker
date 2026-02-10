@@ -13,6 +13,7 @@ interface ControlPanelProps {
   onGenerate: () => void;
   downloadUrl: string | null;
   downloadExtension: string;
+  exportWarning?: string | null;
 }
 
 const ControlPanel: React.FC<ControlPanelProps> = ({
@@ -26,7 +27,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   onTogglePlay,
   onGenerate,
   downloadUrl,
-  downloadExtension
+  downloadExtension,
+  exportWarning
 }) => {
   const handleChange = (key: keyof TrackerSettings, value: any) => {
     onSettingsChange({ ...settings, [key]: value });
@@ -235,13 +237,20 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         ) : (
             <>
                 {downloadUrl ? (
-                    <a 
-                        href={downloadUrl} 
-                        download={`visioncore_export_${Date.now()}.${downloadExtension}`}
-                        className="block w-full py-4 bg-neon-green text-black font-bold text-center tracking-widest hover:bg-white transition-colors rounded shadow-[0_0_15px_rgba(10,255,0,0.3)]"
-                    >
-                        DOWNLOAD EXPORT ({downloadExtension.toUpperCase()})
-                    </a>
+                    <div className="space-y-2">
+                        <a 
+                            href={downloadUrl} 
+                            download={`visioncore_export_${Date.now()}.${downloadExtension}`}
+                            className="block w-full py-4 bg-neon-green text-black font-bold text-center tracking-widest hover:bg-white transition-colors rounded shadow-[0_0_15px_rgba(10,255,0,0.3)]"
+                        >
+                            DOWNLOAD EXPORT ({downloadExtension.toUpperCase()})
+                        </a>
+                        {exportWarning && (
+                            <div className="p-2 bg-yellow-900/20 border border-yellow-700/50 text-yellow-500 text-[10px] rounded text-center leading-tight">
+                                ⚠ {exportWarning}
+                            </div>
+                        )}
+                    </div>
                 ) : (
                     <button 
                         onClick={onGenerate}

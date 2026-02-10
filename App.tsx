@@ -12,6 +12,7 @@ function App() {
   const [renderProgress, setRenderProgress] = useState(0);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [downloadExt, setDownloadExt] = useState<string>('webm');
+  const [exportWarning, setExportWarning] = useState<string | null>(null);
 
   const [settings, setSettings] = useState<TrackerSettings>({
     threshold: 100,
@@ -41,6 +42,7 @@ function App() {
       setDownloadUrl(null);
       setRenderState('idle');
       setRenderProgress(0);
+      setExportWarning(null);
       
       setVideoFile(e.target.files[0]);
       setIsPlaying(true);
@@ -53,6 +55,7 @@ function App() {
     setRenderState('rendering');
     setRenderProgress(0);
     setDownloadUrl(null);
+    setExportWarning(null);
   };
 
   const handleRenderUpdate = (progress: number) => {
@@ -62,11 +65,12 @@ function App() {
       if (bar) bar.style.width = `${progress}%`;
   };
 
-  const handleRenderComplete = (blob: Blob, extension: string) => {
+  const handleRenderComplete = (blob: Blob, extension: string, warning?: string) => {
     setRenderState('completed');
     const url = URL.createObjectURL(blob);
     setDownloadUrl(url);
     setDownloadExt(extension);
+    if (warning) setExportWarning(warning);
     setIsPlaying(false); // Keep paused after render
   };
 
@@ -128,6 +132,7 @@ function App() {
         onGenerate={handleGenerate}
         downloadUrl={downloadUrl}
         downloadExtension={downloadExt}
+        exportWarning={exportWarning}
       />
     </div>
   );

@@ -13,7 +13,7 @@ interface BlobTrackerProps {
   renderState: RenderState;
   onStatsUpdate: (stats: ProcessingStats) => void;
   onRenderProgress: (progress: number) => void;
-  onRenderComplete: (blob: Blob, extension: string) => void;
+  onRenderComplete: (blob: Blob, extension: string, warning?: string) => void;
 }
 
 const BlobTracker: React.FC<BlobTrackerProps> = ({
@@ -64,9 +64,14 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       
       videoRef.current.onloadedmetadata = () => {
         if (!videoRef.current) return;
-        const vw = videoRef.current.videoWidth;
-        const vh = videoRef.current.videoHeight;
+        let vw = videoRef.current.videoWidth;
+        let vh = videoRef.current.videoHeight;
         
+        // CRITICAL: Force even dimensions. H.264 encoding (MP4) often fails or errors 
+        // with odd dimensions in MediaRecorder.
+        if (vw % 2 !== 0) vw -= 1;
+        if (vh % 2 !== 0) vh -= 1;
+
         setDimensions({ w: vw, h: vh });
         
         // Calculate preview scale (how much to shrink video for fast CV)
@@ -218,17 +223,19 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       const cvCanvas = document.createElement('canvas');
       cvCanvas.width = cvW;
       cvCanvas.height = cvH;
-      // GPU filter support
       const cvCtx = cvCanvas.getContext('2d'); 
       if (!cvCtx) return;
 
       // 2. Determine Export Format (Strictly Prefer MP4)
       let mimeType = '';
       let extension = 'mp4';
+      let warning = undefined;
       
+      // Order of preference for MP4/H.264
       const mp4Types = [
         "video/mp4; codecs=h264",
         "video/mp4; codecs=avc1.42E01E, mp4a.40.2",
+        "video/mp4; codecs=avc1.4d002a", // High Profile
         "video/mp4; codecs=avc1",
         "video/mp4"
       ];
@@ -239,8 +246,10 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         mimeType = supportedMp4;
         extension = 'mp4';
       } else {
-        // Fallback (e.g. Firefox)
-        console.warn("MP4 export not supported by this browser. Falling back to WebM.");
+        // Fallback for browsers without MP4 recording (e.g., Firefox)
+        warning = "MP4 export is not supported by your browser. Falling back to WebM.";
+        console.warn(warning);
+        
         if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9")) {
              mimeType = "video/webm;codecs=vp9";
         } else {
@@ -252,15 +261,20 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       console.log(`Using Export Format: ${mimeType}`);
 
       // 3. Setup Stream (Constant 30FPS)
-      // We use 30FPS auto-capture to ensure the output video plays at 1x speed.
-      // Render loop will update the canvas. If render is slow, frames will be duplicated 
-      // in the recording, preserving correct timing.
       const stream = renderCanvas.captureStream(30);
       
-      const recorder = new MediaRecorder(stream, { 
-        mimeType, 
-        videoBitsPerSecond: 15000000 // 15Mbps
-      });
+      let recorder: MediaRecorder;
+      try {
+          recorder = new MediaRecorder(stream, { 
+            mimeType, 
+            videoBitsPerSecond: 15000000 // 15Mbps
+          });
+      } catch (e) {
+          console.error("MediaRecorder init failed with preferred type, trying default", e);
+          recorder = new MediaRecorder(stream);
+          extension = 'webm'; // Default likely webm
+          warning = "Codec init failed. Falling back to default format.";
+      }
       
       const chunks: Blob[] = [];
       recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
@@ -288,7 +302,6 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
              resolve();
            };
            vid.addEventListener('seeked', onSeek);
-           // Timeout fallback
            setTimeout(() => {
                vid.removeEventListener('seeked', onSeek);
                resolve(); 
@@ -296,7 +309,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         });
 
         // A. Draw Full Res Video to Render Canvas
-        ctx.drawImage(vid, 0, 0);
+        ctx.drawImage(vid, 0, 0, dimensions.w, dimensions.h);
 
         // B. GPU ACCELERATED PRE-PROCESSING
         const blurRadius = Math.max(0, (settings.blurSize - 1) / 2);
@@ -306,7 +319,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         cvCtx.drawImage(vid, 0, 0, cvW, cvH);
         cvCtx.filter = 'none'; // Reset
 
-        // C. Process CV on Low Res Canvas (CPU - Skip Blur)
+        // C. Process CV on Low Res Canvas
         const blobs = cvProcessor.current.processFrame(cvCtx, cvW, cvH, settings, cvScale, true);
 
         // D. Draw Overlays on Full Res Render Canvas
@@ -316,9 +329,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
         }
         drawOverlays(ctx, blobs, dimensions.w, dimensions.h, currentTime * 1000);
 
-        // E. Yield to ensure MediaRecorder picks up the frame
-        // Since captureStream(30) runs on a timer, we don't need to manually request frames.
-        // However, we need to make sure we don't block the main thread entirely.
+        // E. Yield
         await new Promise(r => setTimeout(r, 0));
         
         // Progress
@@ -330,7 +341,7 @@ const BlobTracker: React.FC<BlobTrackerProps> = ({
       // Finish
       recorder.onstop = () => {
         const blob = new Blob(chunks, { type: mimeType });
-        onRenderComplete(blob, extension);
+        onRenderComplete(blob, extension, warning);
       };
       
       // Stop recorder and stream tracks
